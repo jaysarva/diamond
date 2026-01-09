@@ -24,7 +24,8 @@ initialization:
 
 common:
   devices: 0  # int, list of int, cpu, or all 
-  seed: null
+  seed: 42
+  deterministic: True  # Enable PyTorch deterministic mode for reproducibility (slower but reproducible)
   resume: False # do not modify, set by scripts/resume.sh only.
 
 checkpointing:

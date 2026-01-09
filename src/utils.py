@@ -4,6 +4,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 import json
+import os
 from pathlib import Path
 import random
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -289,11 +290,40 @@ def save_with_backup(obj: Any, path: Path):
     bk.unlink(missing_ok=True)
 
 
-def set_seed(seed: int) -> None:
+def set_torch_determinism(deterministic: bool = True) -> None:
+    """Configure PyTorch for deterministic behavior.
+    
+    This is necessary for full reproducibility when using GPU operations.
+    Even with set_seed(), cuDNN operations can be non-deterministic without this.
+    
+    Args:
+        deterministic: If True, enables deterministic mode (slower but reproducible).
+                      If False, enables benchmark mode (faster but non-deterministic).
+    """
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        # Optional: can reduce perf and sometimes breaks certain ops
+        # torch.use_deterministic_algorithms(True)
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    else:
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+
+
+def set_seed(seed: int, deterministic: bool = True) -> None:
+    """Set random seeds for reproducibility.
+    
+    Args:
+        seed: Random seed value.
+        deterministic: If True, also enables PyTorch deterministic mode (recommended for reproducibility).
+    """
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     random.seed(seed)
+    if deterministic:
+        set_torch_determinism(True)
 
 
 def skip_if_run_is_over(func: Callable) -> Callable:

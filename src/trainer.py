@@ -198,10 +198,10 @@ class Trainer(StateDictMixin):
         if cfg.common.resume:
             self.load_state_checkpoint()
             # Restore seed from checkpoint and re-apply it
-            set_seed(self.seed)
+            set_seed(self.seed, deterministic=cfg.common.deterministic)
         else:
             # Set seed from config or random value (already initialized above)
-            set_seed(self.seed)
+            set_seed(self.seed, deterministic=cfg.common.deterministic)
             self.save_checkpoint()
 
         if self._rank == 0:
