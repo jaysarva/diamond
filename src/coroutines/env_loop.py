@@ -1,5 +1,5 @@
 import random
-from typing import Generator, Tuple, Union
+from typing import Generator, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,11 @@ from envs import TorchEnv, WorldModelEnv
 
 @coroutine
 def make_env_loop(
-    env: Union[TorchEnv, WorldModelEnv], model: nn.Module, epsilon: float = 0.0
+    env: Union[TorchEnv, WorldModelEnv],
+    model: nn.Module,
+    epsilon: float = 0.0,
+    timers: Optional[object] = None,
+    interaction_label: Optional[str] = None,
 ) -> Generator[Tuple[torch.Tensor, ...], int, None]:
     num_steps = yield
 
@@ -34,7 +38,11 @@ def make_env_loop(
             if random.random() < epsilon:
                 act = torch.randint(low=0, high=env.num_actions, size=(obs.size(0),), device=obs.device)
 
-            next_obs, rew, end, trunc, info = env.step(act)
+            if timers is not None and interaction_label is not None:
+                with timers.time(interaction_label):
+                    next_obs, rew, end, trunc, info = env.step(act)
+            else:
+                next_obs, rew, end, trunc, info = env.step(act)
 
             if n > 0:
                 val_bootstrap = val.detach().clone()

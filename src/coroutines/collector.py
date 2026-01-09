@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from . import coroutine
 from data import Episode, Dataset
-from envs import TorchEnv
+from envs import TorchEnv, WorldModelEnv
 from .env_loop import make_env_loop
 from utils import Logs
 
@@ -21,6 +21,7 @@ def make_collector(
     epsilon: float = 0.0,
     reset_every_collect: bool = False,
     verbose: bool = True,
+    timers: Optional[object] = None,
 ) -> Generator[Logs, int, None]:
     num_envs = env.num_envs
 
@@ -42,7 +43,10 @@ def make_collector(
 
     def reset():
         nonlocal env_loop, episode_ids, dead
-        env_loop = make_env_loop(env, model, epsilon)
+        interaction_label = None
+        if timers is not None:
+            interaction_label = "env_interaction" if not isinstance(env, WorldModelEnv) else None
+        env_loop = make_env_loop(env, model, epsilon, timers=timers, interaction_label=interaction_label)
         episode_ids = defaultdict(lambda: None)
         dead = [None] * num_envs
 

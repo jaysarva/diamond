@@ -17,6 +17,7 @@ from agent import Agent
 from coroutines.collector import make_collector, NumToCollect
 from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser
 from envs import make_atari_env, WorldModelEnv
+from timing_utils import DEFAULT_TIMING_KEYS, TimingTracker
 from utils import (
     broadcast_if_needed,
     build_ddp_wrapper,
@@ -63,6 +64,7 @@ class Trainer(StateDictMixin):
         # Flags
         self._is_static_dataset = cfg.static_dataset.path is not None
         self._is_model_free = cfg.training.model_free
+        self._timers = TimingTracker()
 
         # Checkpointing
         self._path_ckpt_dir = Path("checkpoints")
@@ -115,10 +117,19 @@ class Trainer(StateDictMixin):
         # Collectors
         if not self._is_static_dataset and self._rank == 0:
             self._train_collector = make_collector(
-                train_env, self.agent.actor_critic, self.train_dataset, cfg.collection.train.epsilon
+                train_env,
+                self.agent.actor_critic,
+                self.train_dataset,
+                cfg.collection.train.epsilon,
+                timers=self._timers,
             )
             self._test_collector = make_collector(
-                test_env, self.agent.actor_critic, self.test_dataset, cfg.collection.test.epsilon, reset_every_collect=True
+                test_env,
+                self.agent.actor_critic,
+                self.test_dataset,
+                cfg.collection.test.epsilon,
+                reset_every_collect=True,
+                timers=self._timers,
             )
 
         ######################################################
@@ -177,7 +188,13 @@ class Trainer(StateDictMixin):
             bs = make_batch_sampler(c.batch_size, sl, get_sample_weights(c.sample_weights))
             dl_actor_critic = make_data_loader(batch_sampler=bs)
             wm_env_cfg = instantiate(cfg.world_model_env)
-            rl_env = WorldModelEnv(self.agent.denoiser, self.agent.rew_end_model, dl_actor_critic, wm_env_cfg)
+            rl_env = WorldModelEnv(
+                self.agent.denoiser,
+                self.agent.rew_end_model,
+                dl_actor_critic,
+                wm_env_cfg,
+                timers=self._timers,
+            )
 
             if cfg.training.compile_wm:
                 rl_env.predict_next_obs = torch.compile(rl_env.predict_next_obs, mode="reduce-overhead")
@@ -186,7 +203,7 @@ class Trainer(StateDictMixin):
         # Setup training
         sigma_distribution_cfg = instantiate(cfg.denoiser.sigma_distribution)
         actor_critic_loss_cfg = instantiate(cfg.actor_critic.actor_critic_loss)
-        self.agent.setup_training(sigma_distribution_cfg, actor_critic_loss_cfg, rl_env)
+        self.agent.setup_training(sigma_distribution_cfg, actor_critic_loss_cfg, rl_env, timers=self._timers)
 
         # Training state (things to be saved/restored)
         self.epoch = 0
@@ -228,6 +245,7 @@ class Trainer(StateDictMixin):
         while self.epoch < num_epochs:
             self.epoch += 1
             start_time = time.time()
+            self._timers.reset()
 
             if self._rank == 0:
                 print(f"\nEpoch {self.epoch} / {num_epochs}\n")
@@ -255,7 +273,10 @@ class Trainer(StateDictMixin):
                 to_log += self.test_agent()
 
             # Logging
-            to_log.append({"duration": (time.time() - start_time) / 3600})
+            epoch_wall = time.time() - start_time
+            self._timers.add("epoch_wall", epoch_wall)
+            to_log.append({"duration": epoch_wall / 3600})
+            to_log.append(self._timers.to_log(keys=DEFAULT_TIMING_KEYS))
             if self._rank == 0:
                 wandb_log(to_log, self.epoch)
             to_log = []
@@ -364,28 +385,30 @@ class Trainer(StateDictMixin):
 
         num_steps = cfg.grad_acc_steps * steps
 
-        for i in trange(num_steps, desc=f"Training {name}", disable=self._rank > 0):
-            batch = next(data_iterator).to(self._device) if data_iterator is not None else None
-            loss, metrics = model(batch) if batch is not None else model()
-            loss.backward()
+        timer_name = "policy_value_update" if name == "actor_critic" else "world_model_update"
+        with self._timers.time(timer_name, sync_cuda=True):
+            for i in trange(num_steps, desc=f"Training {name}", disable=self._rank > 0):
+                batch = next(data_iterator).to(self._device) if data_iterator is not None else None
+                loss, metrics = model(batch) if batch is not None else model()
+                loss.backward()
 
-            num_batch = self.num_batch_train.get(name)
-            metrics[f"num_batch_train_{name}"] = num_batch
-            self.num_batch_train.set(name, num_batch + 1)
+                num_batch = self.num_batch_train.get(name)
+                metrics[f"num_batch_train_{name}"] = num_batch
+                self.num_batch_train.set(name, num_batch + 1)
 
-            if (i + 1) % cfg.grad_acc_steps == 0:
-                if cfg.max_grad_norm is not None:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-                    metrics["grad_norm_before_clip"] = grad_norm
+                if (i + 1) % cfg.grad_acc_steps == 0:
+                    if cfg.max_grad_norm is not None:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                        metrics["grad_norm_before_clip"] = grad_norm
 
-                opt.step()
-                opt.zero_grad()
+                    opt.step()
+                    opt.zero_grad()
 
-                if lr_sched is not None:
-                    metrics["lr"] = lr_sched.get_last_lr()[0]
-                    lr_sched.step()
+                    if lr_sched is not None:
+                        metrics["lr"] = lr_sched.get_last_lr()[0]
+                        lr_sched.step()
 
-            to_log.append(metrics)
+                to_log.append(metrics)
 
         process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
         to_log = [{f"{name}/train/{k}": v for k, v in d.items()} for d in to_log]

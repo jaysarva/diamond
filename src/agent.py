@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -41,9 +41,10 @@ class Agent(nn.Module):
         sigma_distribution_cfg: SigmaDistributionConfig,
         actor_critic_loss_cfg: ActorCriticLossConfig,
         rl_env: Union[TorchEnv, WorldModelEnv],
+        timers: Optional[object] = None,
     ) -> None:
         self.denoiser.setup_training(sigma_distribution_cfg)
-        self.actor_critic.setup_training(rl_env, actor_critic_loss_cfg)
+        self.actor_critic.setup_training(rl_env, actor_critic_loss_cfg, timers=timers)
 
     def load(
         self,
