@@ -60,9 +60,15 @@ class ActorCritic(nn.Module):
     def device(self) -> torch.device:
         return self.lstm.weight_hh.device
 
-    def setup_training(self, rl_env: Union[TorchEnv, WorldModelEnv], loss_cfg: ActorCriticLossConfig) -> None:
+    def setup_training(
+        self,
+        rl_env: Union[TorchEnv, WorldModelEnv],
+        loss_cfg: ActorCriticLossConfig,
+        timers: Optional[object] = None,
+    ) -> None:
         assert self.env_loop is None and self.loss_cfg is None
-        self.env_loop = make_env_loop(rl_env, self)
+        interaction_label = "env_interaction" if isinstance(rl_env, TorchEnv) else None
+        self.env_loop = make_env_loop(rl_env, self, timers=timers, interaction_label=interaction_label)
         self.loss_cfg = loss_cfg
 
     def predict_act_value(self, obs: Tensor, hx_cx: Tuple[Tensor, Tensor]) -> ActorCriticOutput:

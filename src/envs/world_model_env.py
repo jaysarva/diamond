@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -30,13 +30,17 @@ class WorldModelEnv:
         data_loader: DataLoader,
         cfg: WorldModelEnvConfig,
         return_denoising_trajectory: bool = False,
+        timers: Optional[object] = None,
+        diffusion_role: str = "teacher",
     ) -> None:
-        self.sampler = DiffusionSampler(denoiser, cfg.diffusion_sampler)
+        self.sampler = DiffusionSampler(denoiser, cfg.diffusion_sampler, timers=None, role=diffusion_role)
         self.rew_end_model = rew_end_model
         self.horizon = cfg.horizon
         self.return_denoising_trajectory = return_denoising_trajectory
         self.num_envs = data_loader.batch_sampler.batch_size
         self.generator_init = self.make_generator_init(data_loader, cfg.num_batches_to_preload)
+        self._timers = timers
+        self._diffusion_role = diffusion_role
 
     @property
     def device(self) -> torch.device:
@@ -63,9 +67,43 @@ class WorldModelEnv:
 
     @torch.no_grad()
     def step(self, act: torch.LongTensor) -> StepOutput:
-        self.act_buffer[:, -1] = act
+        if self._timers is not None:
+            with self._timers.time("imagination_rollout", sync_cuda=True):
+                self.act_buffer[:, -1] = act
+        else:
+            self.act_buffer[:, -1] = act
 
-        next_obs, denoising_trajectory = self.predict_next_obs()
+        if self._timers is not None:
+            label = f"diffusion_sampling_{self._diffusion_role}"
+            with self._timers.time(label, sync_cuda=True):
+                next_obs, denoising_trajectory = self.predict_next_obs()
+        else:
+            next_obs, denoising_trajectory = self.predict_next_obs()
+
+        if self._timers is not None:
+            with self._timers.time("imagination_rollout", sync_cuda=True):
+                rew, end = self.predict_rew_end(next_obs.unsqueeze(1))
+
+                self.ep_len += 1
+                trunc = (self.ep_len >= self.horizon).long()
+
+                self.obs_buffer = self.obs_buffer.roll(-1, dims=1)
+                self.act_buffer = self.act_buffer.roll(-1, dims=1)
+                self.obs_buffer[:, -1] = next_obs
+
+                dead = torch.logical_or(end, trunc)
+
+                info = {}
+                if self.return_denoising_trajectory:
+                    info["denoising_trajectory"] = torch.stack(denoising_trajectory, dim=1)
+
+                if dead.any():
+                    self.reset_dead(dead)
+                    info["final_observation"] = next_obs[dead]
+                    info["burnin_obs"] = self.obs_buffer[dead, :-1]
+
+                return self.obs_buffer[:, -1], rew, end, trunc, info
+
         rew, end = self.predict_rew_end(next_obs.unsqueeze(1))
 
         self.ep_len += 1
